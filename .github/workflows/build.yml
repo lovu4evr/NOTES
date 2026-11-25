@@ -17,31 +17,54 @@ jobs:
 
       - name: Find project (root / subfolder / zip)
         id: find
+        shell: bash
         run: |
           set -e
           DIR=""
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            DIR="$PWD"
+
+          # 1) Project already extracted in repo (root ya subfolder)
+          S=$(find . -maxdepth 5 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' -not -path '*/__MACOSX/*' | head -1)
+          if [ -n "$S" ]; then
+            DIR="$(cd "$(dirname "$S")" && pwd)"
           else
-            S=$(find . -maxdepth 4 \( -name settings.gradle.kts -o -name settings.gradle \) -not -path './.git/*' | head -1)
-            if [ -n "$S" ]; then
-              DIR="\( (cd " \)(dirname "$S")" && pwd)"
-            else
-              Z=$(find . -maxdepth 3 -iname '*.zip' -not -path './.git/*' | head -1)
-              if [ -z "$Z" ]; then echo "No project or zip found in repo"; exit 1; fi
-              mkdir -p /tmp/proj
-              unzip -q -o "$Z" -d /tmp/proj
-              S=$(find /tmp/proj \( -name settings.gradle.kts -o -name settings.gradle \) | head -1)
-              if [ -z "$S" ]; then echo "settings.gradle not found inside zip"; exit 1; fi
-              DIR="\( (cd " \)(dirname "$S")" && pwd)"
+            # 2) Zip files me dhoondo
+            echo "No extracted project, searching zips..."
+            mapfile -t ZIPS < <(find . -maxdepth 5 -iname '*.zip' -not -path './.git/*')
+            if [ ${#ZIPS[@]} -eq 0 ]; then
+              echo "No project or zip found in repo"; exit 1
+            fi
+            i=0
+            for Z in "${ZIPS[@]}"; do
+              i=$((i+1))
+              OUT="$RUNNER_TEMP/proj$i"
+              mkdir -p "$OUT"
+              echo "Unzipping: $Z"
+              unzip -q -o "$Z" -d "$OUT" || continue
+              S=$(find "$OUT" \( -name settings.gradle.kts -o -name settings.gradle \) -not -path '*/__MACOSX/*' | head -1)
+              if [ -n "$S" ]; then
+                DIR="$(cd "$(dirname "$S")" && pwd)"
+                break
+              fi
+            done
+            if [ -z "$DIR" ]; then
+              echo "settings.gradle not found in any zip"; exit 1
             fi
           fi
+
           echo "Project dir: $DIR"
           echo "dir=$DIR" >> "$GITHUB_OUTPUT"
 
+          if [ -f "$DIR/gradlew" ]; then
+            chmod +x "$DIR/gradlew"
+            echo "cmd=./gradlew" >> "$GITHUB_OUTPUT"
+          else
+            echo "cmd=gradle" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Prepare Android SDK
+        shell: bash
         run: |
-          echo "sdk.dir=\( ANDROID_HOME" > " \){{ steps.find.outputs.dir }}/local.properties"
+          echo "sdk.dir=$ANDROID_HOME" > "${{ steps.find.outputs.dir }}/local.properties"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
 
@@ -50,15 +73,16 @@ jobs:
           gradle-version: 8.7
 
       - name: Unit tests
+        shell: bash
         working-directory: ${{ steps.find.outputs.dir }}
-        run: gradle test --no-daemon || true
+        run: ${{ steps.find.outputs.cmd }} test --no-daemon || true
 
       - name: Build debug APK
         shell: bash
         working-directory: ${{ steps.find.outputs.dir }}
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
+          ${{ steps.find.outputs.cmd }} assembleDebug --no-daemon --console=plain 2>&1 | tee build.log
 
       - name: Show errors on failure
         if: failure()
@@ -74,7 +98,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: AetherNotes-APK
-          path: ${{ steps.find.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.find.outputs.dir }}/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 
       - name: Upload reports (on failure)
@@ -82,5 +106,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-reports
-          path: ${{ steps.find.outputs.dir }}/app/build/reports
+          path: ${{ steps.find.outputs.dir }}/**/build/reports
           if-no-files-found: ignore
